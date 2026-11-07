@@ -1,0 +1,154 @@
+name: build
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Everything is read-only unless a job asks for more.
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install pinned tools
+        run: |
+          TOOLS="opa" scripts/install-tools.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: App unit test
+        run: |
+          pip install --require-hashes -r requirements.txt
+          pip install -r requirements-dev.txt
+          pytest -q app
+      - name: Policy unit tests
+        run: opa test policy/ -v
+      - name: Mock API tests
+        run: |
+          pip install -r mocks/requirements.txt
+          pytest -q mocks
+
+  # Build -> scan the exact image -> policy gate -> (main only) push that same image.
+  build-scan:
+    needs: test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write # push to GHCR (main only)
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # gitleaks scans full history; changed_paths needs the parent
+          persist-credentials: false
+      - name: Install pinned tools
+        run: |
+          TOOLS="semgrep trivy gitleaks opa" scripts/install-tools.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build image
+        run: docker build -t "lab-app:${GITHUB_SHA}" .
+      - name: Changed paths (signed later inside every scan predicate)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            git diff --name-only "$BASE_SHA...$GITHUB_SHA" > changed_paths.txt
+          else
+            # main is squash-merge only, so HEAD^..HEAD is the whole PR
+            git diff --name-only HEAD^ HEAD > changed_paths.txt 2>/dev/null || git ls-files > changed_paths.txt  # root commit
+          fi
+          cat changed_paths.txt
+      - name: Scan + policy gate
+        env:
+          GIT_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CHANGED_PATHS_FILE: changed_paths.txt
+          OUT: scan-results
+        run: scripts/scan.sh "lab-app:${GITHUB_SHA}"
+      - name: Upload raw + summarized scan results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scan-results
+          path: scan-results/
+          retention-days: 30
+      - name: Push the scanned image
+        id: push
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag "lab-app:${GITHUB_SHA}" "$IMAGE:${GITHUB_SHA}"
+          docker push "$IMAGE:${GITHUB_SHA}"
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:${GITHUB_SHA}" | cut -d@ -f2)"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          printf '### Image\n`%s@%s`\n' "$IMAGE" "$digest" >> "$GITHUB_STEP_SUMMARY"
+
+  # SLSA Build L3: provenance generated in an isolated reusable workflow.
+  # NOTE: this is the ONE reference not pinned by SHA. slsa-verifier only trusts the
+  # generator when it is referenced by a release tag (vX.Y.Z); a SHA ref fails verification.
+  provenance:
+    needs: build-scan
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      actions: read
+      id-token: write
+      packages: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
+    with:
+      image: ghcr.io/${{ github.repository }}
+      digest: ${{ needs.build-scan.outputs.digest }}
+      registry-username: ${{ github.actor }}
+    secrets:
+      registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+  # Bind each scan result to the image digest as a keyless-signed in-toto attestation.
+  attest-scans:
+    needs: build-scan
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write # Fulcio certificate via GitHub OIDC
+      packages: write # write .att to GHCR
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install cosign
+        run: |
+          TOOLS="cosign" scripts/install-tools.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: scan-results
+          path: scan-results
+      - name: Attest sast / sca / secrets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIGEST: ${{ needs.build-scan.outputs.digest }}
+        run: |
+          echo "$GH_TOKEN" | cosign login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for kind in sast sca secrets; do
+            cosign attest --yes \
+              --type "https://slsa-pipeline-lab/attestations/${kind}/v1" \
+              --predicate "scan-results/${kind}.json" \
+              "$IMAGE@$DIGEST"
+          done

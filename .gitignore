@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+scan-results/
+evidence/
+mocks/*.db
+.pytest_cache/

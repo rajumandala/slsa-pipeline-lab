@@ -1,0 +1,7 @@
+# Default gitleaks rules + ignore scanner output and local venvs (not part of the source).
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "generated scan output and local environments"
+paths = ['''(^|/)scan-results/''', '''(^|/)\.venv/''', '''(^|/)evidence/''']

@@ -1,0 +1,11 @@
+{
+  "thresholds": {
+    "count_unfixed": false,
+    "build_max": {"critical": 0, "secrets": 0},
+    "release_manual_if_high_over": 0,
+    "sensitive_paths": ["auth/", "payments/", "migrations/"],
+    "required_scans": ["sast", "sca", "secrets"],
+    "repo": "rajumandala/slsa-pipeline-lab",
+    "builder_id": "https://github.com/slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml"
+  }
+}
