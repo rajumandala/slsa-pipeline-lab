@@ -15,7 +15,10 @@ trivy fs    --quiet --scanners vuln --format json -o "$OUT/trivy-fs.json" .
 trivy image --quiet --scanners vuln --format json -o "$OUT/trivy-image.json" "$IMAGE"
 
 if git rev-parse --git-dir >/dev/null 2>&1; then
-  gitleaks git --no-banner --redact --exit-code 0 --report-format json --report-path "$OUT/gitleaks.json" .
+  # gitleaks defaults to `git log --all`, which would flag secrets on *other* branches.
+  # Scope it: PRs pass "base..head"; default is the full history of HEAD.
+  gitleaks git --no-banner --redact --exit-code 0 --log-opts="${GITLEAKS_LOG_OPTS:-HEAD}" \
+    --report-format json --report-path "$OUT/gitleaks.json" .
 else
   gitleaks dir --no-banner --redact --exit-code 0 --report-format json --report-path "$OUT/gitleaks.json" .
 fi

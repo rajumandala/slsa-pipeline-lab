@@ -5,3 +5,4 @@ scan-results/
 evidence/
 mocks/*.db
 .pytest_cache/
+mocks/.env.local
