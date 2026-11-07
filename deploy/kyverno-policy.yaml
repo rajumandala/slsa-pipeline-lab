@@ -1,0 +1,70 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-slsa-and-scans
+  annotations:
+    policies.kyverno.io/description: >-
+      Admit only images with SLSA L3 provenance from slsa-github-generator for
+      rajumandala/slsa-pipeline-lab, plus clean SCA and secrets scan attestations
+      signed by that repo's build.yml on main (keyless, GitHub OIDC).
+spec:
+  webhookTimeoutSeconds: 30
+  background: false
+  rules:
+    - name: verify-provenance-and-scans
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [demo]
+      verifyImages:
+        - imageReferences: ["*"]
+          failureAction: Enforce
+          mutateDigest: true
+          verifyDigest: true
+          required: true
+          attestations:
+            # 1) SLSA provenance: signed by the generator's reusable workflow, called from our repo
+            - type: https://slsa.dev/provenance/v0.2
+              attestors:
+                - entries:
+                    - keyless:
+                        subject: "https://github.com/slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@refs/tags/v2.1.0"
+                        issuer: "https://token.actions.githubusercontent.com"
+                        additionalExtensions:
+                          githubWorkflowRepository: rajumandala/slsa-pipeline-lab
+                        rekor:
+                          url: https://rekor.sigstore.dev
+              conditions:
+                - all:
+                    - key: "{{ invocation.configSource.uri }}"
+                      operator: Equals
+                      value: "git+https://github.com/rajumandala/slsa-pipeline-lab@refs/heads/main"
+            # 2) SCA scan attestation signed by our build workflow on main; no fixable criticals
+            - type: https://slsa-pipeline-lab/attestations/sca/v1
+              attestors:
+                - entries:
+                    - keyless:
+                        subject: "https://github.com/rajumandala/slsa-pipeline-lab/.github/workflows/build.yml@refs/heads/main"
+                        issuer: "https://token.actions.githubusercontent.com"
+                        rekor:
+                          url: https://rekor.sigstore.dev
+              conditions:
+                - all:
+                    - key: "{{ fixable.critical }}"
+                      operator: Equals
+                      value: 0
+            # 3) Secrets scan attestation; zero secrets
+            - type: https://slsa-pipeline-lab/attestations/secrets/v1
+              attestors:
+                - entries:
+                    - keyless:
+                        subject: "https://github.com/rajumandala/slsa-pipeline-lab/.github/workflows/build.yml@refs/heads/main"
+                        issuer: "https://token.actions.githubusercontent.com"
+                        rekor:
+                          url: https://rekor.sigstore.dev
+              conditions:
+                - all:
+                    - key: "{{ fixable.secrets }}"
+                      operator: Equals
+                      value: 0
