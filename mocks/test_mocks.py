@@ -46,7 +46,7 @@ def test_developer_direct_db_edit_is_reverted_by_reconcile(client):
     assert status(client, "T-SAST") == "Complete"
 
     r = client.post("/sde/reconcile").json()
-    assert r["reverted"] == [{"id": "T-SAST", "from": "Complete", "to": "Incomplete"}]
+    assert [(x["id"], x["from"], x["to"]) for x in r["reverted"]] == [("T-SAST", "Complete", "Incomplete")]
     assert status(client, "T-SAST") == "Incomplete"
     assert any(a["msg"].startswith("ALERT T-SAST") for a in client.get("/sde/alerts").json())
 
@@ -86,3 +86,12 @@ def test_change_request_flow(client):
     assert upd.json()["state"] == "approved"
     # developer token cannot open changes
     assert client.post("/snow/change", headers={"Authorization": f"Bearer {DEV}"}, json=body).status_code == 403
+
+
+def test_reverts_to_last_verified_digest(client):
+    h = {"Authorization": f"Bearer {CI}"}
+    client.put("/sde/countermeasures/T-SCA", headers=h, json={"status": "Complete", "note": "ok", "digest": GOOD})
+    client.put("/sde/countermeasures/T-SCA", headers=h, json={"status": "Complete", "note": "forged", "digest": FORGED})
+    r = client.post("/sde/reconcile").json()["reverted"][0]
+    assert (r["from_digest"], r["to_digest"], r["to"]) == (FORGED, GOOD, "Complete")
+    assert client.post("/sde/reconcile").json()["reverted"] == []  # stable after revert

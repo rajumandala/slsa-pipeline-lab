@@ -80,6 +80,8 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           CHANGED_PATHS_FILE: changed_paths.txt
           OUT: scan-results
+          # PR: only the PR's commits; main: full history of HEAD
+          GITLEAKS_LOG_OPTS: ${{ github.event_name == 'pull_request' && format('{0}..{1}', github.event.pull_request.base.sha, github.sha) || 'HEAD' }}
         run: scripts/scan.sh "lab-app:${GITHUB_SHA}"
       - name: Upload raw + summarized scan results
         if: always()

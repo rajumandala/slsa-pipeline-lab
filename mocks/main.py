@@ -32,11 +32,16 @@ def db():
     con.executescript("""
       CREATE TABLE IF NOT EXISTS changes(id TEXT PRIMARY KEY, created TEXT, state TEXT, body TEXT);
       CREATE TABLE IF NOT EXISTS cm(id TEXT PRIMARY KEY, status TEXT, note TEXT, digest TEXT, changed_by TEXT, updated TEXT,
-                                    verified_status TEXT);  -- last status backed by a verified attestation
+                                    verified_status TEXT, verified_digest TEXT);  -- last state backed by a verified attestation
       CREATE TABLE IF NOT EXISTS log(ts TEXT, kind TEXT, msg TEXT);
     """)
+    try:  # migrate DBs created before verified_digest existed
+        con.execute("ALTER TABLE cm ADD COLUMN verified_digest TEXT")
+        con.execute("UPDATE cm SET verified_digest=digest WHERE changed_by='ci' AND status=verified_status")
+    except sqlite3.OperationalError:
+        pass
     for cid in CM:
-        con.execute("INSERT OR IGNORE INTO cm VALUES(?, 'Incomplete', 'initial', NULL, 'system', ?, 'Incomplete')", (cid, now()))
+        con.execute("INSERT OR IGNORE INTO cm VALUES(?, 'Incomplete', 'initial', NULL, 'system', ?, 'Incomplete', NULL)", (cid, now()))
     con.commit()
     return con
 
@@ -165,8 +170,9 @@ def put_cm(cid: str, u: CMUpdate, role: str = Depends(bearer)):
     cm_row(con, cid)
     # CI is trusted to call us, but the status still has to match a verified attestation.
     verified = status_justified(u.status, verifier(u.digest, CM[cid]))
-    con.execute("UPDATE cm SET status=?, note=?, digest=?, changed_by='ci', updated=?, verified_status=CASE WHEN ? THEN ? ELSE verified_status END WHERE id=?",
-                (u.status, u.note, u.digest, now(), verified, u.status, cid))
+    con.execute("UPDATE cm SET status=?, note=?, digest=?, changed_by='ci', updated=?, verified_status=CASE WHEN ? THEN ? ELSE verified_status END, "
+                "verified_digest=CASE WHEN ? THEN ? ELSE verified_digest END WHERE id=?",
+                (u.status, u.note, u.digest, now(), verified, u.status, verified, u.digest, cid))
     con.execute("INSERT INTO log VALUES(?,?,?)", (now(), "info", f"ci set {cid}={u.status} digest={u.digest} verified={verified}"))
     con.commit()
     return cm_row(con, cid) | {"verified": verified}
@@ -178,17 +184,19 @@ def reconcile():
     con = db()
     reverted = []
     for row in [dict(r) for r in con.execute("SELECT * FROM cm")]:
-        pred = verifier(row["digest"], CM[row["id"]]) if row["digest"] else None
-        if row["changed_by"] in ("system", "reconciler") and row["status"] == row["verified_status"]:
+        if (row["changed_by"] in ("system", "reconciler") and row["status"] == row["verified_status"]
+                and row["digest"] == row["verified_digest"]):
             continue  # initial or already-reconciled state
+        pred = verifier(row["digest"], CM[row["id"]]) if row["digest"] else None
         if row["changed_by"] == "ci" and status_justified(row["status"], pred):
             continue
         msg = (f"ALERT {row['id']}: status {row['status']} (changed_by={row['changed_by']}, digest={row['digest']}) "
-               f"has no matching verified attestation; reverting to {row['verified_status']}")
-        con.execute("UPDATE cm SET status=?, note=?, changed_by='reconciler', updated=? WHERE id=?",
-                    (row["verified_status"], "reverted by reconciler", now(), row["id"]))
+               f"has no matching verified attestation; reverting to {row['verified_status']} (digest={row['verified_digest']})")
+        con.execute("UPDATE cm SET status=?, digest=?, note=?, changed_by='reconciler', updated=? WHERE id=?",
+                    (row["verified_status"], row["verified_digest"], "reverted by reconciler", now(), row["id"]))
         con.execute("INSERT INTO log VALUES(?,?,?)", (now(), "alert", msg))
-        reverted.append({"id": row["id"], "from": row["status"], "to": row["verified_status"]})
+        reverted.append({"id": row["id"], "from": row["status"], "to": row["verified_status"],
+                         "from_digest": row["digest"], "to_digest": row["verified_digest"]})
     con.commit()
     return {"reverted": reverted}
 
