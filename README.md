@@ -133,6 +133,8 @@ make demo-unsigned                          # rejected
 | Local `make verify` on that digest | PASS provenance (builder `…generator_container_slsa3.yml@refs/tags/v2.1.0`, source `git+https://github.com/rajumandala/slsa-pipeline-lab`), PASS sast/sca/secrets |
 | Release of that digest | **manual**: root commit "changes" `auth/`, `payments/`, `migrations/`. CR `pending_approval` → reviewer approved in environment → SDE T-SAST/T-SCA/T-SECRETS = Complete with run URL + digest → CR `approved` ([run](https://github.com/rajumandala/slsa-pipeline-lab/actions/runs/42369979707)) |
 | `/sde/reconcile` after that release (real cosign against GHCR) | `{"reverted": []}` |
+| PR #3 merged (`2a94752`, no sensitive paths) → `sha256:2d2ec952…f5e9` | release **auto_approve** (`all controls passed`), no manual gate, CR `approved`, SDE Complete on the new digest; reconcile reverted nothing ([run](https://github.com/rajumandala/slsa-pipeline-lab/actions/runs/42372509857)) |
+| Release of a digest with no attestations | **reject**: `provenance: missing` + 3× `verified scan attestation missing`. CR recorded `rejected`, SDE set Incomplete, run fails at `gate` ([run](https://github.com/rajumandala/slsa-pipeline-lab/actions/runs/42372595721)) |
 | Kyverno, good digest | `pod/hello created`, Ready |
 | Kyverno, locally built unsigned image | denied: `image attestations verification failed … no matching attestations` |
 
@@ -158,7 +160,7 @@ Run: [PR #1](https://github.com/rajumandala/slsa-pipeline-lab/pull/1). If it wer
 echo 'h11==0.14.0' >> requirements.in        # CVE-2025-43859, CRITICAL, fixed in 0.16.0
 pip-compile --generate-hashes --strip-extras --no-header -o requirements.txt requirements.in
 ```
-`build-scan` fails with `sca: 1 critical finding(s) (max 0)`. Run: [PR #2](https://github.com/rajumandala/slsa-pipeline-lab/pull/2).
+`build-scan` fails with `sca: 1 critical finding(s) (max 0)` and `secrets: 0`. Runs: [PR #2](https://github.com/rajumandala/slsa-pipeline-lab/pull/2) ([run](https://github.com/rajumandala/slsa-pipeline-lab/actions/runs/42372714508)).
 
 A **high-only** fixable vulnerability (e.g. `urllib3==2.2.1`) passes the build gate by design. At release it becomes `manual` (`sca: N high finding(s) need human review`), which is covered by `test_fixable_high_is_manual`.
 
